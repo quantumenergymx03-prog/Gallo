@@ -5,7 +5,6 @@ import time
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from matplotlib.collections import PolyCollection
 from flet.matplotlib_chart import MatplotlibChart
 from flet.plotly_chart import PlotlyChart
 import numpy as np
@@ -15,6 +14,9 @@ import re
 import joblib
 import warnings
 import json
+import math
+import io
+import base64
 matplotlib.use("Agg")
 # Matplotlib font configuration to avoid missing glyphs in SVG (e.g., Arial)
 import matplotlib as mpl
@@ -26,7 +28,6 @@ import os
 import colorsys
 import unicodedata
 from typing import Optional, Tuple, Dict, Any, List, Sequence, Mapping
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  # Needed for 3D projections
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 # --- PDF reportlab imports ---
@@ -2129,6 +2130,7 @@ class MainApp:
         self.current_df = None
         self._raw_current_df: Optional[pd.DataFrame] = None
         self.current_file_path: Optional[str] = None
+        self.current_file_source_path: Optional[str] = None
         self.current_fft_label: Optional[str] = None
 
         self.file_data_storage = {}  # Almacenar datos de archivos
@@ -3162,6 +3164,53 @@ class MainApp:
             border_radius=10,
             bgcolor=background,
         )
+
+    def _matplotlib_fig_to_image(
+        self,
+        fig,
+        *,
+        alt_text: str = "",
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> ft.Control:
+        """Convierte una figura de Matplotlib en un control de imagen para Flet."""
+
+        buffer = io.BytesIO()
+        dpi = 160
+        try:
+            fig_width, fig_height = fig.get_size_inches()
+        except Exception:
+            fig_width, fig_height = (6.0, 4.0)
+        try:
+            fig.savefig(
+                buffer,
+                format="png",
+                dpi=dpi,
+                bbox_inches="tight",
+                facecolor=fig.get_facecolor(),
+            )
+            buffer.seek(0)
+            encoded = base64.b64encode(buffer.read()).decode("ascii")
+            width_px = width if width is not None else int(max(fig_width * dpi, 1))
+            height_px = height if height is not None else int(max(fig_height * dpi, 1))
+            image_control = ft.Image(
+                src_base64=encoded,
+                fit=ft.ImageFit.CONTAIN,
+                semantics_label=alt_text or None,
+                expand=True,
+                width=width_px,
+                height=height_px,
+            )
+            return image_control
+        except Exception as exc:
+            self._log(f"No se pudo generar la imagen estática de Matplotlib: {exc}")
+            return ft.Text(
+                "No se pudo generar la imagen estática de la gráfica.",
+                color="#e74c3c",
+            )
+        finally:
+            plt.close(fig)
+            buffer.close()
 
     def _wrap_chart_with_notice(self, chart: ft.Control | None) -> ft.Control:
         if chart is None:
@@ -6552,7 +6601,7 @@ class MainApp:
             style=ft.ButtonStyle(bgcolor=self._accent_ui(), color="white"),
         )
 
-        self.trend_records_column = ft.Column(spacing=8, scroll="auto")
+        self.trend_records_column = ft.Column(spacing=8, scroll="auto", expand=False)
 
         manager_column = ft.Column(
             [
@@ -6712,91 +6761,419 @@ class MainApp:
             pass
 
     def _load_fft_trend_history(self) -> Dict[str, List[Dict[str, Any]]]:
-        records: Dict[str, List[Dict[str, Any]]] = {}
+        """Lee el historial de tendencias FFT desde disco y normaliza la estructura."""
+
         path = getattr(self, "fft_trend_history_path", None)
-        if not path:
-            return records
+        if not path or not os.path.exists(path):
+            return {}
+
         try:
-            if not os.path.exists(path):
-                return records
             with open(path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
-            if isinstance(payload, dict) and "records" in payload:
-                payload = payload.get("records", {})
-            if isinstance(payload, list):
-                payload = {"_global": payload}
-            if not isinstance(payload, dict):
-                return records
-            max_records = getattr(self, "fft_trend_max_records", 30) or 0
-            for raw_label, entries in payload.items():
-                if not isinstance(entries, list):
-                    continue
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    freq_raw = entry.get("freq") or entry.get("frequencies")
-                    amp_raw = entry.get("amp") or entry.get("spectrum")
-                    if not isinstance(freq_raw, (list, tuple)) or not isinstance(amp_raw, (list, tuple)):
-                        continue
-                    freq_clean: List[float] = []
-                    amp_clean: List[float] = []
-                    for val in freq_raw:
-                        try:
-                            freq_clean.append(float(val))
-                        except Exception:
-                            continue
-                    for val in amp_raw:
-                        try:
-                            amp_clean.append(float(val))
-                        except Exception:
-                            continue
-                    if len(freq_clean) < 4 or len(freq_clean) != len(amp_clean):
-                        continue
-                    timestamp = str(entry.get("timestamp") or entry.get("date") or "")
-                    label_value = entry.get("label") or entry.get("source") or raw_label or ""
-                    label_clean = str(label_value).strip() or "analisis_actual"
-                    normalized_entry = {
-                        "timestamp": timestamp,
-                        "label": label_clean,
-                        "freq": freq_clean,
-                        "amp": amp_clean,
-                        "freq_unit": str(entry.get("freq_unit") or "Hz"),
-                        "amp_unit": str(entry.get("amp_unit") or "mm/s"),
-                        "source_path": str(entry.get("source_path") or entry.get("source") or ""),
-                        "stored_path": str(entry.get("stored_path") or ""),
-                    }
-                    bucket = records.setdefault(label_clean, [])
-                    bucket.append(normalized_entry)
-                    if max_records and len(bucket) > max_records:
-                        records[label_clean] = bucket[-max_records:]
         except Exception as exc:
             try:
-                print(f"[WARN] No se pudo cargar historial FFT: {exc}")
+                self._log(f"No se pudo leer el historial FFT: {exc}")
             except Exception:
                 pass
+            return {}
+
+        if isinstance(payload, dict) and "records" in payload:
+            payload = payload.get("records", {})
+        elif isinstance(payload, list):
+            payload = {"_global": payload}
+
+        if not isinstance(payload, dict):
+            return {}
+
+        max_records = int(getattr(self, "fft_trend_max_records", 30) or 0)
+        records: Dict[str, List[Dict[str, Any]]] = {}
+
+        for raw_label, entries in payload.items():
+            if not isinstance(entries, list):
+                continue
+            snapshots: List[Dict[str, Any]] = []
+            for entry in entries:
+                normalized = self._normalise_fft_trend_entry(entry, fallback_label=str(raw_label))
+                if normalized is None:
+                    continue
+                snapshots.append(normalized)
+            if not snapshots:
+                continue
+            if max_records > 0 and len(snapshots) > max_records:
+                snapshots = snapshots[-max_records:]
+            label_clean = snapshots[-1].get("label") or str(raw_label) or "analisis_actual"
+            records[label_clean] = snapshots
+
         return records
 
     def _persist_fft_trend_history(self) -> None:
         path = getattr(self, "fft_trend_history_path", None)
         if not path:
             return
+
+        serializable: Dict[str, List[Dict[str, Any]]] = {}
+        for label, entries in (self.fft_trend_records or {}).items():
+            if not isinstance(entries, list):
+                continue
+            clean_entries: List[Dict[str, Any]] = []
+            for entry in entries:
+                normalized = self._normalise_fft_trend_entry(entry, fallback_label=str(label))
+                if normalized is None:
+                    continue
+                clean_entries.append(
+                    {
+                        "timestamp": normalized.get("timestamp"),
+                        "label": normalized.get("label"),
+                        "freq": list(normalized.get("freq", [])),
+                        "amp": list(normalized.get("amp", [])),
+                        "freq_unit": normalized.get("freq_unit", "Hz"),
+                        "amp_unit": normalized.get("amp_unit", "mm/s"),
+                        "source_path": normalized.get("source_path", ""),
+                        "stored_path": normalized.get("stored_path", ""),
+                    }
+                )
+            if clean_entries:
+                serializable[str(label)] = clean_entries
+
+        payload = {"version": 1, "records": serializable}
+
         try:
-            payload = {"records": self.fft_trend_records}
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)
         except Exception as exc:
             self._log(f"No se pudo guardar historial FFT: {exc}")
 
-    def _build_fft_trend_view(self) -> ft.Control:
-        from datetime import datetime as _dt  # local import to avoid circular references in serialization
+    def _normalise_fft_trend_entry(
+        self,
+        entry: Any,
+        *,
+        fallback_label: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Convierte un registro de tendencia en una estructura homogénea."""
 
-        label = self.current_fft_label
+        if not isinstance(entry, dict):
+            return None
+
+        freq_raw = (
+            entry.get("freq")
+            or entry.get("frequencies")
+            or entry.get("frequency")
+            or entry.get("x")
+        )
+        amp_raw = (
+            entry.get("amp")
+            or entry.get("amplitude")
+            or entry.get("spectrum")
+            or entry.get("y")
+        )
+
+        if not isinstance(freq_raw, (list, tuple)) or not isinstance(amp_raw, (list, tuple)):
+            return None
+
+        freq_list: List[float] = []
+        amp_list: List[float] = []
+
+        for val in freq_raw:
+            try:
+                freq_list.append(float(val))
+            except Exception:
+                continue
+
+        for val in amp_raw:
+            try:
+                amp_list.append(float(val))
+            except Exception:
+                continue
+
+        if not freq_list or not amp_list:
+            return None
+
+        length = min(len(freq_list), len(amp_list))
+        if length < 4:
+            return None
+
+        freq_arr = np.asarray(freq_list[:length], dtype=float).ravel()
+        amp_arr = np.asarray(amp_list[:length], dtype=float).ravel()
+        valid = np.isfinite(freq_arr) & np.isfinite(amp_arr)
+        if not np.any(valid):
+            return None
+        freq_arr = freq_arr[valid]
+        amp_arr = amp_arr[valid]
+        if freq_arr.size < 4:
+            return None
+
+        order = np.argsort(freq_arr)
+        freq_arr = freq_arr[order]
+        amp_arr = amp_arr[order]
+
+        freq_unit = str(entry.get("freq_unit") or entry.get("frequency_unit") or "Hz")
+        amp_unit = str(entry.get("amp_unit") or entry.get("velocity_unit") or "mm/s")
+
+        timestamp = str(
+            entry.get("timestamp")
+            or entry.get("datetime")
+            or entry.get("date")
+            or entry.get("time")
+            or ""
+        ).strip()
+        if not timestamp:
+            timestamp = datetime.now().isoformat(timespec="seconds")
+
+        label = str(entry.get("label") or fallback_label or "").strip() or "analisis_actual"
+
+        def _clean_path(path_value: Any) -> str:
+            try:
+                candidate = str(path_value or "").strip()
+            except Exception:
+                return ""
+            if not candidate:
+                return ""
+            try:
+                return os.path.abspath(candidate)
+            except Exception:
+                return candidate
+
+        source_path = _clean_path(entry.get("source_path") or entry.get("source"))
+        stored_path = _clean_path(entry.get("stored_path"))
+        if not stored_path and source_path:
+            stored_path = source_path
+
+        return {
+            "timestamp": timestamp,
+            "label": label,
+            "freq": freq_arr.tolist(),
+            "amp": amp_arr.tolist(),
+            "freq_unit": freq_unit,
+            "amp_unit": amp_unit,
+            "source_path": source_path,
+            "stored_path": stored_path,
+        }
+
+    def _prepare_fft_trend_matrix(
+        self,
+        label: str,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, List[str], str, str]]:
+        """Prepara la malla de frecuencias y la matriz de amplitud interpolada."""
+
+        records = list((self.fft_trend_records or {}).get(label, []))
+        if not records:
+            return None
+
+        parsed: List[Tuple[datetime, Dict[str, Any]]] = []
+        for entry in records:
+            normalized = self._normalise_fft_trend_entry(entry, fallback_label=label)
+            if normalized is None:
+                continue
+            ts_text = str(normalized.get("timestamp", ""))
+            ts_dt: datetime
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d"):
+                try:
+                    ts_dt = datetime.strptime(ts_text, fmt)
+                    break
+                except Exception:
+                    continue
+            else:
+                try:
+                    ts_dt = datetime.fromisoformat(ts_text)
+                except Exception:
+                    ts_dt = datetime.now()
+            parsed.append((ts_dt, normalized))
+
+        if not parsed:
+            return None
+
+        parsed.sort(key=lambda item: item[0])
+
+        freq_arrays: List[np.ndarray] = []
+        amp_arrays: List[np.ndarray] = []
+        timestamps: List[str] = []
+        for ts_dt, item in parsed:
+            freq = np.asarray(item.get("freq", []), dtype=float).ravel()
+            amp = np.asarray(item.get("amp", []), dtype=float).ravel()
+            if freq.size < 4 or amp.size != freq.size:
+                continue
+            freq_arrays.append(freq)
+            amp_arrays.append(amp)
+            timestamps.append(ts_dt.strftime("%d/%m/%Y %H:%M"))
+
+        if not freq_arrays:
+            return None
+
+        freq_min = min(float(np.min(freq)) for freq in freq_arrays if freq.size)
+        freq_max = max(float(np.max(freq)) for freq in freq_arrays if freq.size)
+        if not np.isfinite(freq_min) or not np.isfinite(freq_max) or freq_max <= 0:
+            return None
+        freq_min = max(0.0, freq_min)
+
+        points = int(getattr(self, "fft_trend_max_points", 512) or 512)
+        points = max(64, min(points, 2048))
+        freq_grid = np.linspace(freq_min, freq_max, points)
+
+        amp_matrix: List[np.ndarray] = []
+        for freq, amp in zip(freq_arrays, amp_arrays):
+            interpolated = np.interp(freq_grid, freq, amp, left=0.0, right=0.0)
+            amp_matrix.append(interpolated)
+
+        amp_matrix_np = np.vstack(amp_matrix)
+        amp_matrix_np = np.nan_to_num(amp_matrix_np, nan=0.0, posinf=0.0, neginf=0.0)
+
+        amp_unit = parsed[-1][1].get("amp_unit", "mm/s")
+        freq_unit = parsed[-1][1].get("freq_unit", "Hz")
+
+        return freq_grid, amp_matrix_np, timestamps, str(freq_unit), str(amp_unit)
+
+    def _render_fft_trend_chart(
+        self,
+        freq_grid: np.ndarray,
+        amp_matrix: np.ndarray,
+        timestamps: List[str],
+        freq_unit: str,
+        amp_unit: str,
+    ) -> ft.Control:
+        """Genera el control Flet para la gráfica de tendencia."""
+
+        line_color = self.fft_plot_color if getattr(self, "fft_plot_color", None) else self._accent_ui()
+        face_color = "#0f141b" if self.is_dark_mode else "white"
+
+        if self.interactive_charts_enabled:
+            if amp_matrix.shape[0] == 1:
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Scatter(
+                        x=freq_grid.tolist(),
+                        y=amp_matrix[0].tolist(),
+                        mode="lines",
+                        line=dict(color=line_color, width=2),
+                        hovertemplate=(
+                            f"Frecuencia: %{{x:.3f}} {freq_unit}<br>"
+                            f"Velocidad: %{{y:.3f}} {amp_unit}<extra></extra>"
+                        ),
+                    )
+                )
+                title = timestamps[0] if timestamps else "Registro"
+                fig.update_layout(
+                    title=f"Histórico FFT guardado – {title}",
+                    xaxis=dict(title=f"Frecuencia ({freq_unit})"),
+                    yaxis=dict(title=f"Velocidad [{amp_unit}]", rangemode="tozero"),
+                    template="plotly_dark" if self.is_dark_mode else "plotly_white",
+                    paper_bgcolor=face_color,
+                    plot_bgcolor=face_color,
+                    margin=dict(l=50, r=30, t=60, b=50),
+                )
+                return PlotlyChart(fig, expand=True)
+
+            heatmap_data = amp_matrix.T
+            vmax = float(np.max(heatmap_data)) if heatmap_data.size else 0.0
+            vmax = vmax if (np.isfinite(vmax) and vmax > 0) else None
+            colorscale = "Inferno" if self.is_dark_mode else "Magma"
+            fig = go.Figure(
+                data=[
+                    go.Heatmap(
+                        x=list(range(len(timestamps))),
+                        y=freq_grid.tolist(),
+                        z=heatmap_data,
+                        colorscale=colorscale,
+                        zmin=0,
+                        zmax=vmax,
+                        colorbar=dict(title=f"Velocidad [{amp_unit}]"),
+                        hovertemplate=(
+                            "Registro #%{x}<br>"
+                            f"Frecuencia: %{{y:.3f}} {freq_unit}<br>"
+                            f"Velocidad: %{{z:.3f}} {amp_unit}<extra></extra>"
+                        ),
+                    )
+                ]
+            )
+            fig.update_layout(
+                title="Tendencia FFT (evolución de amplitud)",
+                xaxis=dict(
+                    title="Registro",
+                    tickmode="array",
+                    tickvals=list(range(len(timestamps))),
+                    ticktext=timestamps,
+                ),
+                yaxis=dict(title=f"Frecuencia ({freq_unit})"),
+                template="plotly_dark" if self.is_dark_mode else "plotly_white",
+                paper_bgcolor=face_color,
+                plot_bgcolor=face_color,
+                margin=dict(l=70, r=40, t=60, b=90),
+            )
+            return PlotlyChart(fig, expand=True)
+
+        # ---- Matplotlib fallback ----
+        if amp_matrix.shape[0] == 1:
+            fig, ax = plt.subplots(figsize=(10, 4.5))
+            y_values = amp_matrix[0]
+            ax.plot(freq_grid, y_values, color=line_color, linewidth=2)
+            ax.fill_between(freq_grid, y_values, color=line_color, alpha=0.25)
+            ax.set_xlabel(f"Frecuencia ({freq_unit})")
+            ax.set_ylabel(f"Velocidad [{amp_unit}]")
+            title = timestamps[0] if timestamps else "Histórico FFT guardado"
+            ax.set_title(f"Histórico FFT guardado – {title}")
+            ax.grid(True, alpha=0.25)
+            text_color = "white" if self.is_dark_mode else "black"
+            ax.tick_params(colors=text_color)
+            ax.xaxis.label.set_color(text_color)
+            ax.yaxis.label.set_color(text_color)
+            ax.title.set_color(text_color)
+            ax.set_facecolor("#1a222b" if self.is_dark_mode else "#f8f9fb")
+            fig.patch.set_facecolor("#0f141b" if self.is_dark_mode else "white")
+            fig.tight_layout()
+            return self._matplotlib_fig_to_image(fig, alt_text="Histórico FFT guardado")
+
+        fig, ax = plt.subplots(figsize=(11, 5))
+        heatmap_data = amp_matrix.T
+        vmax = float(np.max(heatmap_data)) if heatmap_data.size else None
+        if vmax is not None and (not np.isfinite(vmax) or vmax <= 0):
+            vmax = None
+        cmap = "inferno" if self.is_dark_mode else "magma"
+        extent = (-0.5, amp_matrix.shape[0] - 0.5, freq_grid[0], freq_grid[-1])
+        im = ax.imshow(
+            heatmap_data,
+            aspect="auto",
+            origin="lower",
+            extent=extent,
+            cmap=cmap,
+            vmin=0,
+            vmax=vmax,
+        )
+        ax.set_xlabel("Registro")
+        ax.set_ylabel(f"Frecuencia ({freq_unit})")
+        ax.set_title("Tendencia FFT (evolución de amplitud)")
+        if timestamps:
+            total = len(timestamps)
+            if total > 12:
+                step = max(1, math.ceil(total / 12))
+                indices = list(range(0, total, step))
+            else:
+                indices = list(range(total))
+            ax.set_xticks(indices)
+            ax.set_xticklabels([timestamps[i] for i in indices], rotation=45, ha="right")
+        text_color = "white" if self.is_dark_mode else "black"
+        ax.tick_params(colors=text_color)
+        ax.xaxis.label.set_color(text_color)
+        ax.yaxis.label.set_color(text_color)
+        ax.title.set_color(text_color)
+        ax.set_facecolor("#1a222b" if self.is_dark_mode else "#f8f9fb")
+        fig.patch.set_facecolor("#0f141b" if self.is_dark_mode else "white")
+        cbar = fig.colorbar(im, ax=ax, pad=0.02)
+        cbar.set_label(f"Velocidad [{amp_unit}]")
+        if self.is_dark_mode:
+            cbar.ax.yaxis.set_tick_params(color="white")
+            plt.setp(cbar.ax.get_yticklabels(), color="white")
+        fig.tight_layout()
+        return self._matplotlib_fig_to_image(fig, alt_text="Tendencia FFT")
+
+    def _build_fft_trend_view(self) -> ft.Control:
+        label = (self.current_fft_label or "").strip()
+        header = ft.Text("Histórico FFT (tendencia)", size=20, weight="bold")
+
         if not label:
             return ft.Column(
                 [
-                    ft.Text("Histórico FFT (tendencia)", size=20, weight="bold"),
+                    header,
                     ft.Text(
-                        "No hay análisis seleccionado. Carga un archivo y guarda una FFT para iniciar el histórico.",
+                        "No hay análisis seleccionado. Guarda una FFT después de procesar un archivo para iniciar el histórico.",
                         size=13,
                         color="#7f8c8d",
                     ),
@@ -6804,170 +7181,42 @@ class MainApp:
                 spacing=8,
             )
 
-        records_all = self.fft_trend_records or {}
-        records = list(records_all.get(label, []))
-        if not records:
+        prepared = self._prepare_fft_trend_matrix(label)
+        if not prepared:
             return ft.Column(
                 [
                     ft.Text(f"Histórico FFT (tendencia) – {label}", size=20, weight="bold"),
                     ft.Text(
-                        "Aún no hay registros guardados para este análisis. Usa “Guardar FFT (tendencia)” después de generar la gráfica.",
+                        "Aún no hay registros válidos guardados para este motor.",
                         size=13,
                         color="#7f8c8d",
                     ),
                 ],
                 spacing=8,
             )
-        try:
-            usable: List[Tuple[np.ndarray, np.ndarray, _dt]] = []
-            time_labels: List[str] = []
-            limit = self.fft_trend_max_records or len(records)
-            for idx, entry in enumerate(records[-limit:]):
-                freq = np.asarray(entry.get("freq", []), dtype=float).ravel()
-                amp = np.asarray(entry.get("amp", []), dtype=float).ravel()
-                if freq.size < 4 or amp.size != freq.size:
-                    continue
-                order = np.argsort(freq)
-                freq = freq[order]
-                amp = amp[order]
-                valid = np.isfinite(freq) & np.isfinite(amp)
-                freq = freq[valid]
-                amp = amp[valid]
-                if freq.size < 4:
-                    continue
-                ts_raw = entry.get("timestamp")
-                try:
-                    ts_dt = _dt.fromisoformat(str(ts_raw))
-                except Exception:
-                    ts_dt = _dt.now()
-                usable.append((freq, amp, ts_dt))
-                time_labels.append(ts_dt.strftime("%d/%m/%Y %H:%M"))
-            if not usable:
-                raise ValueError("No hay datos válidos en el histórico.")
 
-            freq_unit = records[-1].get("freq_unit", "Hz")
-            amp_unit = records[-1].get("amp_unit", "mm/s")
+        freq_grid, amp_matrix, timestamps, freq_unit, amp_unit = prepared
+        chart = self._render_fft_trend_chart(freq_grid, amp_matrix, timestamps, freq_unit, amp_unit)
 
-            freq_max = max(float(np.nanmax(freq)) for freq, *_ in usable if freq.size)
-            freq_min = min(float(np.nanmin(freq)) for freq, *_ in usable if freq.size)
-            if not np.isfinite(freq_max) or freq_max <= 0:
-                raise ValueError("No se pudo determinar el rango de frecuencias.")
-            if not np.isfinite(freq_min) or freq_min < 0:
-                freq_min = 0.0
-            points = min(self.fft_trend_max_points, 512)
-            freq_grid = np.linspace(freq_min, freq_max, points)
+        legend_controls: List[ft.Control] = []
+        for idx, ts in enumerate(timestamps, start=1):
+            legend_controls.append(ft.Text(f"#{idx:02d} · {ts}", size=12))
 
-            amp_matrix: List[np.ndarray] = []
-            timestamps: List[_dt] = []
-            for freq, amp, ts_dt in usable:
-                amp_interp = np.interp(freq_grid, freq, amp, left=0.0, right=0.0)
-                amp_matrix.append(amp_interp)
-                timestamps.append(ts_dt)
-            amp_matrix_np = np.vstack(amp_matrix)  # shape (records, freq_points)
-
-            from matplotlib import cm
-
-            face_color = "#0f141b" if self.is_dark_mode else "white"
-            axis_color = "white" if self.is_dark_mode else "black"
-
-            if len(amp_matrix_np) == 1:
-                fig, ax = plt.subplots(figsize=(10, 4))
-                fig.patch.set_facecolor(face_color)
-                ax.set_facecolor(face_color)
-                ax.plot(freq_grid, amp_matrix_np[0], color=self._accent_ui(), linewidth=2)
-                ax.set_title("Histórico FFT guardado (1 registro)", color=axis_color)
-                ax.set_xlabel(f"Frecuencia ({freq_unit})", color=axis_color)
-                ax.set_ylabel(f"Velocidad [{amp_unit}]", color=axis_color)
-                ax.grid(True, alpha=0.3)
-                for tick in ax.get_xticklabels() + ax.get_yticklabels():
-                    tick.set_color(axis_color)
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", UserWarning)
-                        fig.tight_layout()
-                except Exception:
-                    pass
-                chart = MatplotlibChart(fig, expand=True, isolated=True)
-                plt.close(fig)
-            else:
-                time_nums = mdates.date2num(timestamps)
-                fig = plt.figure(figsize=(10, 5))
-                fig.patch.set_facecolor(face_color)
-                ax = fig.add_subplot(111, projection="3d")
-                ax.set_facecolor(face_color)
-                color_vals = cm.viridis(np.linspace(0.1, 0.9, amp_matrix_np.shape[0]))
-                max_amp = float(np.nanmax(amp_matrix_np)) if np.size(amp_matrix_np) else 0.0
-                for amp_row, time_num, color in zip(amp_matrix_np, time_nums, color_vals):
-                    verts = [list(zip(freq_grid, amp_row))]
-                    poly = PolyCollection(
-                        verts,
-                        facecolors=[(color[0], color[1], color[2], 0.22)],
-                        edgecolors="none",
-                    )
-                    ax.add_collection3d(poly, zs=time_num, zdir="x")
-                    ax.plot(
-                        freq_grid,
-                        amp_row,
-                        zs=time_num,
-                        zdir="x",
-                        color=color,
-                        linewidth=2.0,
-                    )
-                ax.set_xlim(time_nums.min(), time_nums.max())
-                ax.set_ylim(freq_grid.min(), freq_grid.max())
-                if np.isfinite(max_amp) and max_amp > 0:
-                    ax.set_zlim(0.0, max_amp * 1.05)
-                ax.set_title("Histórico FFT guardado", color=axis_color)
-                ax.set_xlabel("Fecha", color=axis_color)
-                ax.set_ylabel(f"Frecuencia ({freq_unit})", color=axis_color)
-                ax.set_zlabel(f"Velocidad [{amp_unit}]", color=axis_color)
-                ax.view_init(elev=32, azim=-135)
-                ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-                ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m/%Y\n%H:%M"))
-                for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
-                    for tick in axis.get_ticklabels():
-                        tick.set_color(axis_color)
-                ax.title.set_color(axis_color)
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", UserWarning)
-                        fig.tight_layout()
-                except Exception:
-                    pass
-                chart = MatplotlibChart(fig, expand=True, isolated=True)
-                plt.close(fig)
-
-            legend_texts = []
-            for idx, ts_text in enumerate(time_labels, start=1):
-                legend_texts.append(ft.Text(f"{ts_text} · FFT #{idx}", size=12))
-
-            legend_column = ft.Column(legend_texts, spacing=2, scroll="auto") if legend_texts else ft.Container()
-
-            return ft.Column(
-                [
-                    ft.Text(f"Histórico FFT (tendencia) – {label}", size=20, weight="bold"),
-                    chart,
-                    legend_column,
-                ],
-                spacing=12,
+        content: List[ft.Control] = [
+            ft.Text(f"Histórico FFT (tendencia) – {label}", size=20, weight="bold"),
+        ]
+        if not self.interactive_charts_enabled:
+            content.append(self._build_chart_notice())
+        content.append(chart)
+        if legend_controls:
+            content.append(
+                ft.Container(
+                    content=ft.Column(legend_controls, spacing=4, scroll="auto"),
+                    padding=ft.padding.only(top=4),
+                )
             )
-        except Exception as exc:
-            import traceback
-            self._log(f"No se pudo construir la gráfica de tendencia: {exc}")
-            tb = traceback.format_exc()
-            for line in tb.strip().splitlines():
-                self._log(line)
-            return ft.Column(
-                [
-                    ft.Text("Histórico FFT (tendencia)", size=20, weight="bold"),
-                    ft.Text(
-                        f"No se pudo construir la gráfica de tendencia: {exc}",
-                        size=13,
-                        color="#e74c3c",
-                    ),
-                ],
-                spacing=8,
-            )
+
+        return ft.Column(content, spacing=12, expand=True)
 
     def _refresh_fft_trend_chart(self) -> None:
         try:
@@ -7017,106 +7266,107 @@ class MainApp:
 
     def _refresh_trend_file_manager(self) -> None:
         try:
-            label = self.current_fft_label or ""
-            try:
-                if getattr(self, "motor_label_field", None) is not None:
-                    self.motor_label_field.value = label
-                    if getattr(self.motor_label_field, "page", None):
-                        self.motor_label_field.update()
-            except Exception:
-                pass
+            label = (self.current_fft_label or "").strip()
 
-            records = (self.fft_trend_records or {}).get(label, [])
-            record_controls: List[ft.Control] = []
-            if not records:
-                record_controls.append(
+            if getattr(self, "motor_label_field", None) is not None:
+                self.motor_label_field.value = label
+                if getattr(self.motor_label_field, "page", None):
+                    self.motor_label_field.update()
+
+            entries = list((self.fft_trend_records or {}).get(label, []))
+            cards: List[ft.Control] = []
+
+            if not label:
+                cards.append(
                     ft.Text(
-                        "Sin registros guardados para este motor. Guarda una FFT después de generar el análisis.",
+                        "Asigna una etiqueta al motor para agrupar sus mediciones en la tendencia.",
+                        size=12,
+                        color="#7f8c8d",
+                    )
+                )
+            elif not entries:
+                cards.append(
+                    ft.Text(
+                        "No hay FFT guardadas todavía para este motor.",
                         size=12,
                         color="#7f8c8d",
                     )
                 )
             else:
-                limit = self.fft_trend_max_records or len(records)
-                visible = records[-limit:]
+                limit = int(getattr(self, "fft_trend_max_records", 0) or len(entries))
+                visible = entries[-limit:] if limit < len(entries) else entries
                 for idx, entry in enumerate(visible, start=1):
-                    ts = entry.get("timestamp", "N/D")
-                    source_path = entry.get("source_path") or entry.get("source") or ""
-                    stored_path = entry.get("stored_path") or ""
-                    resolved_path = ""
-                    subtitle = "Origen desconocido"
-                    subtitle_color = "#7f8c8d"
-                    if source_path and os.path.exists(source_path):
-                        resolved_path = source_path
-                        subtitle = os.path.basename(source_path)
-                    elif stored_path and os.path.exists(stored_path):
-                        resolved_path = stored_path
-                        base_name = os.path.basename(stored_path)
-                        subtitle = f"{base_name} (copia local)"
-                        subtitle_color = "#16a085"
-                    else:
-                        fallback_name = os.path.basename(source_path) or os.path.basename(stored_path) or ""
-                        if fallback_name:
-                            subtitle = f"{fallback_name} (no disponible)"
-                        subtitle_color = "#e74c3c"
-                    info_column = ft.Column(
-                        [
-                            ft.Text(f"{idx}. {ts}", weight="bold"),
-                            ft.Text(subtitle, size=12, color=subtitle_color),
-                        ],
-                        spacing=2,
-                        expand=True,
-                    )
-                    action_buttons: List[ft.Control] = []
-                    if resolved_path:
-                        action_buttons.append(
+                    normalized = self._normalise_fft_trend_entry(entry, fallback_label=label)
+                    if normalized is None:
+                        continue
+                    timestamp = normalized.get("timestamp", "N/D")
+                    source_path = normalized.get("source_path", "")
+                    stored_path = normalized.get("stored_path", "")
+                    resolved_path = stored_path or source_path
+
+                    info_lines: List[ft.Text] = []
+                    if stored_path:
+                        exists = os.path.exists(stored_path)
+                        base = os.path.basename(stored_path) or stored_path
+                        color = "#16a085" if exists else "#e74c3c"
+                        suffix = "" if exists else " (no encontrado)"
+                        info_lines.append(ft.Text(f"Copia local: {base}{suffix}", size=12, color=color))
+                    if source_path and source_path != stored_path:
+                        exists = os.path.exists(source_path)
+                        base = os.path.basename(source_path) or source_path
+                        color = "#7f8c8d" if exists else "#e67e22"
+                        suffix = "" if exists else " (no disponible)"
+                        info_lines.append(ft.Text(f"Original: {base}{suffix}", size=11, color=color))
+                    if not info_lines:
+                        info_lines.append(
+                            ft.Text("Archivo de origen no disponible", size=11, color="#e74c3c")
+                        )
+
+                    title = ft.Text(f"#{idx:02d} · {timestamp}", weight="bold")
+                    info_column = ft.Column([title, *info_lines], spacing=2, expand=True)
+
+                    actions: List[ft.Control] = []
+                    if resolved_path and os.path.exists(resolved_path):
+                        actions.append(
                             ft.IconButton(
-                                icon=ft.Icons.VISIBILITY_ROUNDED,
+                                icon=ft.Icons.PLAYLIST_ADD_CHECK,
                                 tooltip="Cargar este CSV en el análisis",
                                 on_click=lambda e, path=resolved_path: self._load_file_data(path),
                             )
                         )
-                    row = ft.Row(
-                        controls=[
-                            info_column,
-                            ft.Row(action_buttons, spacing=6) if action_buttons else ft.Container(),
-                        ],
-                        alignment="spaceBetween",
-                        vertical_alignment="center",
-                    )
-                    record_controls.append(
+
+                    cards.append(
                         ft.Container(
-                            content=row,
+                            content=ft.Row(
+                                [
+                                    info_column,
+                                    ft.Row(actions, spacing=6) if actions else ft.Container(),
+                                ],
+                                alignment="spaceBetween",
+                                vertical_alignment="center",
+                            ),
                             padding=12,
                             border_radius=8,
                             bgcolor=Colors.with_opacity(0.04, self._accent_ui()),
                         )
                     )
 
-            manager_column = ft.Column(
-                [
-                    ft.Text("Gestión de CSV asociados", size=16, weight="bold"),
-                    ft.Text(
-                        "Define un nombre para el motor y agrega múltiples mediciones CSV para alimentar la tendencia.",
-                        size=12,
-                        color="#7f8c8d",
-                    ),
-                    self.motor_label_field,
-                    self.trend_upload_button,
-                    ft.Divider(height=16, color="transparent"),
-                    ft.Text("Registros guardados", size=14, weight="bold"),
-                    *record_controls,
-                ],
-                spacing=10,
-                expand=True,
-            )
+            if getattr(self, "trend_records_column", None) is None:
+                self.trend_records_column = ft.Column(spacing=8, scroll="auto")
 
-            if getattr(self, "trend_manager_panel", None) is not None:
-                self.trend_manager_panel.content = manager_column
-                if getattr(self.trend_manager_panel, "page", None):
-                    self.trend_manager_panel.update()
-            else:
-                self.trend_records_column = manager_column
+            try:
+                self.trend_records_column.controls.clear()
+                self.trend_records_column.controls.extend(cards)
+            except Exception:
+                self.trend_records_column.controls = list(cards)
+
+            if getattr(self.trend_records_column, "page", None):
+                self.trend_records_column.update()
+
+            if getattr(self, "trend_manager_panel", None) is not None and getattr(
+                self.trend_manager_panel, "page", None
+            ):
+                self.trend_manager_panel.update()
         except Exception as exc:
             import traceback
             self._log(f"No se pudo actualizar el gestor de CSV: {exc}")
@@ -7200,6 +7450,8 @@ class MainApp:
             except Exception:
                 label = "analisis_actual"
             self.current_fft_label = label
+        source_original = getattr(self, "current_file_source_path", None)
+        stored_path = getattr(self, "current_file_path", None)
         record = {
             "timestamp": timestamp,
             "label": label,
@@ -7207,22 +7459,30 @@ class MainApp:
             "amp": [float(x) for x in amp.tolist()],
             "freq_unit": "Hz",
             "amp_unit": "mm/s",
-            "source_path": str(self.current_file_path or ""),
+            "source_path": str(source_original or stored_path or ""),
+            "stored_path": str(stored_path or ""),
         }
+        normalized = self._normalise_fft_trend_entry(record, fallback_label=label)
+        if normalized is None:
+            self._log("No se pudo normalizar el registro de tendencia generado.")
+            return
+
         bucket = self.fft_trend_records.setdefault(label, [])
-        bucket.append(record)
-        if self.fft_trend_max_records and len(bucket) > self.fft_trend_max_records:
-            self.fft_trend_records[label] = bucket[-self.fft_trend_max_records :]
+        bucket.append(normalized)
+        max_records = int(getattr(self, "fft_trend_max_records", 0) or 0)
+        if max_records > 0 and len(bucket) > max_records:
+            self.fft_trend_records[label] = bucket[-max_records:]
         self._persist_fft_trend_history()
         self._refresh_fft_trend_chart()
         total = len(self.fft_trend_records.get(label, []))
         self._log(f"Espectro FFT guardado en el histórico de tendencia para '{label}'. Total registros: {total}.")
-        self.page.snack_bar = ft.SnackBar(
-            content=ft.Text("FFT guardada en el histórico de tendencia."),
-            bgcolor=self._accent_ui(),
-        )
-        self.page.snack_bar.open = True
-        self.page.update()
+        if not silent:
+            self.page.snack_bar = ft.SnackBar(
+                content=ft.Text("FFT guardada en el histórico de tendencia."),
+                bgcolor=self._accent_ui(),
+            )
+            self.page.snack_bar.open = True
+            self.page.update()
         try:
             self._show_trend_history()
         except Exception:
@@ -11529,6 +11789,7 @@ class MainApp:
             clear_file_storage=False,
         )
         self.current_file_path = None
+        self.current_file_source_path = None
         self.current_fft_label = None
         try:
             self._refresh_fft_trend_chart()
@@ -11587,9 +11848,17 @@ class MainApp:
         calibrations: Dict[str, Dict[str, float]] = {}
 
         try:
+            incoming_path = os.path.abspath(file_path)
+        except Exception:
+            incoming_path = str(file_path)
+        original_file_path = incoming_path
+
+        try:
             cached_df: Optional[pd.DataFrame] = None
             if hasattr(self, "file_data_storage") and isinstance(self.file_data_storage, dict):
                 cached_df = self.file_data_storage.get(file_path)
+                if cached_df is None and incoming_path != file_path:
+                    cached_df = self.file_data_storage.get(incoming_path)
         except Exception:
             cached_df = None
 
@@ -11600,6 +11869,7 @@ class MainApp:
                 df = cached_df.copy(deep=True)
                 df_std = df.copy(deep=True)
                 normalized = True
+                file_path = incoming_path
             else:
                 # Carga completa desde disco
                 self._reset_analysis_state_on_new_file()
@@ -11616,22 +11886,29 @@ class MainApp:
                 data_dir = os.path.join(os.getcwd(), "data")
                 os.makedirs(data_dir, exist_ok=True)
                 abs_data_dir = os.path.abspath(data_dir)
-                storage_path = os.path.abspath(file_path)
+                storage_path = incoming_path
                 try:
-                    if not storage_path.startswith(abs_data_dir):
-                        base_name = os.path.basename(file_path)
+                    try:
+                        within_data_dir = os.path.commonpath([storage_path, abs_data_dir]) == abs_data_dir
+                    except Exception:
+                        within_data_dir = str(storage_path).startswith(abs_data_dir)
+                    if not within_data_dir:
+                        base_name = os.path.basename(incoming_path)
                         target_path = os.path.join(data_dir, base_name)
                         root_name, ext = os.path.splitext(base_name)
                         counter = 1
                         while os.path.exists(target_path):
                             target_path = os.path.join(data_dir, f"{root_name}_{counter}{ext}")
                             counter += 1
-                        shutil.copy2(file_path, target_path)
+                        shutil.copy2(incoming_path, target_path)
                         storage_path = os.path.abspath(target_path)
                         self._log(f"Archivo copiado al repositorio local: {os.path.basename(target_path)}")
+                    else:
+                        storage_path = os.path.abspath(storage_path)
                 except Exception as copy_exc:
                     self._log(f"No se pudo guardar copia local: {copy_exc}")
                 file_path = storage_path
+                original_file_path = incoming_path
 
                 if file_path.endswith('.csv'):
                     df_raw = pd.read_csv(file_path)
@@ -11726,10 +12003,17 @@ class MainApp:
         except Exception:
             self.uploaded_files = [file_path]
 
-        self.file_data_storage[file_path] = df.copy(deep=True)
+        dataset_copy = df.copy(deep=True)
+        self.file_data_storage[file_path] = dataset_copy
+        if incoming_path != file_path:
+            self.file_data_storage[incoming_path] = dataset_copy
         self.current_df = df
         self._raw_current_df = df.copy(deep=True)
         self.current_file_path = file_path
+        try:
+            self.current_file_source_path = original_file_path or file_path
+        except Exception:
+            self.current_file_source_path = file_path
         try:
             base_label = os.path.splitext(os.path.basename(file_path))[0]
         except Exception:
