@@ -6601,7 +6601,7 @@ class MainApp:
             style=ft.ButtonStyle(bgcolor=self._accent_ui(), color="white"),
         )
 
-        self.trend_records_column = ft.Column(spacing=8, scroll="auto")
+        self.trend_records_column = ft.Column(spacing=8, scroll="auto", expand=False)
 
         manager_column = ft.Column(
             [
@@ -7351,30 +7351,22 @@ class MainApp:
                         )
                     )
 
-            manager_column = ft.Column(
-                [
-                    ft.Text("Gestión de CSV asociados", size=16, weight="bold"),
-                    ft.Text(
-                        "Usa un nombre de motor y agrega mediciones CSV para construir la tendencia FFT.",
-                        size=12,
-                        color="#7f8c8d",
-                    ),
-                    self.motor_label_field,
-                    self.trend_upload_button,
-                    ft.Divider(height=16, color="transparent"),
-                    ft.Text("Registros guardados", size=14, weight="bold"),
-                    *cards,
-                ],
-                spacing=10,
-                expand=True,
-            )
+            if getattr(self, "trend_records_column", None) is None:
+                self.trend_records_column = ft.Column(spacing=8, scroll="auto")
 
-            if getattr(self, "trend_manager_panel", None) is not None:
-                self.trend_manager_panel.content = manager_column
-                if getattr(self.trend_manager_panel, "page", None):
-                    self.trend_manager_panel.update()
-            else:
-                self.trend_records_column = manager_column
+            try:
+                self.trend_records_column.controls.clear()
+                self.trend_records_column.controls.extend(cards)
+            except Exception:
+                self.trend_records_column.controls = list(cards)
+
+            if getattr(self.trend_records_column, "page", None):
+                self.trend_records_column.update()
+
+            if getattr(self, "trend_manager_panel", None) is not None and getattr(
+                self.trend_manager_panel, "page", None
+            ):
+                self.trend_manager_panel.update()
         except Exception as exc:
             import traceback
             self._log(f"No se pudo actualizar el gestor de CSV: {exc}")
