@@ -6436,7 +6436,7 @@ class MainApp:
                 ft.OutlinedButton(
                     "Limpiar tendencia",
                     icon=ft.Icons.DELETE_SWEEP_ROUNDED,
-                    on_click=self._clear_trend_points,
+                    on_click=self._clear_trend_snapshots,
                 ),
                 ft.OutlinedButton(
                     "Exportar",
@@ -7064,6 +7064,69 @@ class MainApp:
             self._log(
                 f"No se pudo abrir el selector de archivos para la tendencia: {exc}"
             )
+
+    def _load_demo_trend_data(self, e=None):
+        """Genera espectros de ejemplo para mostrar la comparación de FFT."""
+        try:
+            before = len(self.trend_fft_snapshots)
+            self.trend_fft_snapshots = [
+                snap
+                for snap in self.trend_fft_snapshots
+                if not str(snap.get("label", "")).startswith("Demo FFT ")
+            ]
+            if len(self.trend_fft_snapshots) != before:
+                self._refresh_trend_summary()
+        except Exception:
+            # Si algo falla al limpiar, continuamos con la carga de demos.
+            pass
+
+        try:
+            fs = 2560.0
+            duration = 2.5
+            total_samples = int(fs * duration)
+            t_vals = np.arange(total_samples, dtype=float) / fs
+            base_carrier = (
+                0.35 * np.sin(2 * np.pi * 50 * t_vals)
+                + 0.15 * np.sin(2 * np.pi * 90 * t_vals)
+            )
+            rng = np.random.default_rng(20231028)
+
+            demo_profiles = [
+                (6, 1.0, 0.020, 0.0),
+                (3, 1.18, 0.028, 0.03),
+                (0, 1.32, 0.035, 0.05),
+            ]
+
+            now = datetime.now()
+            for idx, (days_ago, amplitude, noise_level, sideband) in enumerate(
+                demo_profiles
+            ):
+                mod_signal = amplitude * base_carrier
+                mod_signal += 0.12 * np.sin(2 * np.pi * (120 + sideband * 100) * t_vals)
+                mod_signal += 0.08 * np.sin(2 * np.pi * (35 + idx * 2) * t_vals)
+                mod_signal += rng.normal(0.0, noise_level, size=t_vals.shape)
+
+                df_demo = pd.DataFrame(
+                    {
+                        "t_s": t_vals,
+                        "acc_ms2": mod_signal,
+                    }
+                )
+
+                label = f"Demo FFT {(now - timedelta(days=days_ago)).strftime('%Y-%m-%d')}"
+                note = "Serie de referencia generada automáticamente"
+
+                self._ingest_fft_snapshot(
+                    df=df_demo,
+                    file_path=None,
+                    source_name=f"demo_{idx+1}",
+                    manual_label=label,
+                    note=note,
+                )
+
+            self._log("Se cargaron FFT de ejemplo para la comparación de tendencia.")
+        except Exception as exc:
+            self._log(f"No se pudieron generar las FFT de ejemplo: {exc}")
 
     def _add_current_fft_snapshot(self, e=None):
         df = getattr(self, "current_df", None)
