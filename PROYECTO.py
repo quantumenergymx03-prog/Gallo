@@ -6863,86 +6863,78 @@ class MainApp:
                 timestamps.append(ts_dt)
             amp_matrix_np = np.vstack(amp_matrix)  # shape (records, freq_points)
 
-            from matplotlib import cm
-
             face_color = "#0f141b" if self.is_dark_mode else "white"
-            axis_color = "white" if self.is_dark_mode else "black"
+
+            amp_matrix_np = np.nan_to_num(amp_matrix_np, nan=0.0, posinf=0.0, neginf=0.0)
 
             if len(amp_matrix_np) == 1:
-                fig, ax = plt.subplots(figsize=(10, 4))
-                fig.patch.set_facecolor(face_color)
-                ax.set_facecolor(face_color)
-                ax.plot(freq_grid, amp_matrix_np[0], color=self._accent_ui(), linewidth=2)
-                ax.set_title("Histórico FFT guardado (1 registro)", color=axis_color)
-                ax.set_xlabel(f"Frecuencia ({freq_unit})", color=axis_color)
-                ax.set_ylabel(f"Velocidad [{amp_unit}]", color=axis_color)
-                ax.grid(True, alpha=0.3)
-                for tick in ax.get_xticklabels() + ax.get_yticklabels():
-                    tick.set_color(axis_color)
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", UserWarning)
-                        fig.tight_layout()
-                except Exception:
-                    pass
-                chart = MatplotlibChart(fig, expand=True, isolated=True)
-                plt.close(fig)
-            else:
-                time_nums = mdates.date2num(timestamps)
-                freq_max = max(freq_max, float(freq_grid.max()))
-                freq_min = min(freq_min, float(freq_grid.min()))
-                if not np.isfinite(freq_max) or not np.isfinite(freq_min):
-                    freq_min, freq_max = 0.0, float(np.nanmax(freq_grid))
-                if freq_max <= freq_min:
-                    freq_max = freq_min + max(freq_max * 0.01, 1.0)
-
-                data = amp_matrix_np.T  # (frecuencia x tiempo)
-                time_start = time_nums[0]
-                time_end = time_nums[-1]
-                if not np.isfinite(time_start) or not np.isfinite(time_end):
-                    time_start, time_end = 0.0, float(len(time_nums) - 1)
-                if time_end <= time_start:
-                    time_end = time_start + 1 / 24  # evita rango nulo en eje X
-
-                cmap = cm.magma if not self.is_dark_mode else cm.inferno
-
-                fig, ax = plt.subplots(figsize=(10, 5))
-                fig.patch.set_facecolor(face_color)
-                ax.set_facecolor(face_color)
-
-                extent = [time_start, time_end, freq_min, freq_max]
-                im = ax.imshow(
-                    data,
-                    aspect="auto",
-                    origin="lower",
-                    extent=extent,
-                    cmap=cmap,
-                    interpolation="nearest",
+                line_color = self.fft_plot_color if getattr(self, "fft_plot_color", None) else self._accent_ui()
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Scatter(
+                        x=freq_grid.tolist(),
+                        y=amp_matrix_np[0].tolist(),
+                        mode="lines",
+                        line=dict(color=line_color, width=2),
+                        hovertemplate=f"Frecuencia: %{{x:.3f}} {freq_unit}<br>Velocidad: %{{y:.3f}} {amp_unit}<extra></extra>",
+                    )
                 )
-
-                ax.xaxis_date()
-                ax.set_xlabel("Fecha / Hora", color=axis_color)
-                ax.set_ylabel(f"Frecuencia ({freq_unit})", color=axis_color)
-                ax.set_title("Tendencia FFT (evolución de amplitud)", color=axis_color)
-                ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-                ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m/%Y\n%H:%M"))
-
-                cbar = fig.colorbar(im, ax=ax, pad=0.02, aspect=30)
-                cbar.set_label(f"Velocidad [{amp_unit}]", color=axis_color)
-                for tick in cbar.ax.get_yticklabels():
-                    tick.set_color(axis_color)
-
-                for tick in ax.get_xticklabels() + ax.get_yticklabels():
-                    tick.set_color(axis_color)
-
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", UserWarning)
-                        fig.tight_layout()
-                except Exception:
-                    pass
-                chart = MatplotlibChart(fig, expand=True, isolated=True)
-                plt.close(fig)
+                fig.update_layout(
+                    title="Histórico FFT guardado (1 registro)",
+                    xaxis=dict(title=f"Frecuencia ({freq_unit})"),
+                    yaxis=dict(title=f"Velocidad [{amp_unit}]", rangemode="tozero"),
+                    template="plotly_dark" if self.is_dark_mode else "plotly_white",
+                    margin=dict(l=40, r=20, t=60, b=40),
+                    paper_bgcolor=face_color,
+                    plot_bgcolor=face_color,
+                )
+                chart = PlotlyChart(fig, expand=True)
+            else:
+                time_iso = [ts.isoformat() for ts in timestamps]
+                heatmap_data = amp_matrix_np.T
+                vmax = float(np.nanmax(heatmap_data)) if np.size(heatmap_data) else 0.0
+                if not np.isfinite(vmax) or vmax <= 0:
+                    vmax = None
+                colorscale = "Inferno" if self.is_dark_mode else "Magma"
+                customdata = np.tile(np.array(time_labels, dtype=object), (len(freq_grid), 1)).tolist()
+                fig = go.Figure(
+                    data=
+                    [
+                        go.Heatmap(
+                            x=time_iso,
+                            y=freq_grid.tolist(),
+                            z=heatmap_data,
+                            colorscale=colorscale,
+                            zsmooth=False,
+                            colorbar=dict(title=f"Velocidad [{amp_unit}]", lenmode="fraction", len=0.75),
+                            zmin=0,
+                            zmax=vmax,
+                            hovertemplate=(
+                                "Fecha: %{customdata}<br>"
+                                f"Frecuencia: %{{y:.3f}} {freq_unit}<br>"
+                                f"Velocidad: %{{z:.3f}} {amp_unit}<extra></extra>"
+                            ),
+                            customdata=customdata,
+                        )
+                    ]
+                )
+                fig.update_layout(
+                    title="Tendencia FFT (evolución de amplitud)",
+                    xaxis=dict(
+                        title="Fecha / Hora",
+                        type="date",
+                        tickmode="array",
+                        tickvals=time_iso,
+                        ticktext=time_labels,
+                        tickangle=0,
+                    ),
+                    yaxis=dict(title=f"Frecuencia ({freq_unit})", rangemode="tozero"),
+                    template="plotly_dark" if self.is_dark_mode else "plotly_white",
+                    margin=dict(l=60, r=30, t=60, b=80),
+                    paper_bgcolor=face_color,
+                    plot_bgcolor=face_color,
+                )
+                chart = PlotlyChart(fig, expand=True)
 
             legend_texts = []
             for idx, ts_text in enumerate(time_labels, start=1):
