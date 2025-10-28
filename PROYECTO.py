@@ -15,6 +15,8 @@ import joblib
 import warnings
 import json
 import math
+import io
+import base64
 matplotlib.use("Agg")
 # Matplotlib font configuration to avoid missing glyphs in SVG (e.g., Arial)
 import matplotlib as mpl
@@ -3161,6 +3163,48 @@ class MainApp:
             border_radius=10,
             bgcolor=background,
         )
+
+    def _matplotlib_fig_to_image(
+        self,
+        fig,
+        *,
+        alt_text: str = "",
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> ft.Control:
+        """Convierte una figura de Matplotlib en un control de imagen para Flet."""
+
+        buffer = io.BytesIO()
+        try:
+            fig.savefig(
+                buffer,
+                format="png",
+                dpi=160,
+                bbox_inches="tight",
+                facecolor=fig.get_facecolor(),
+            )
+            buffer.seek(0)
+            encoded = base64.b64encode(buffer.read()).decode("ascii")
+            image_control = ft.Image(
+                src_base64=encoded,
+                fit=ft.ImageFit.CONTAIN,
+                expand=True,
+                semantics_label=alt_text or None,
+            )
+            if width is not None:
+                image_control.width = width
+            if height is not None:
+                image_control.height = height
+            return image_control
+        except Exception as exc:
+            self._log(f"No se pudo generar la imagen estática de Matplotlib: {exc}")
+            return ft.Text(
+                "No se pudo generar la imagen estática de la gráfica.",
+                color="#e74c3c",
+            )
+        finally:
+            plt.close(fig)
+            buffer.close()
 
     def _wrap_chart_with_notice(self, chart: ft.Control | None) -> ft.Control:
         if chart is None:
@@ -6958,7 +7002,10 @@ class MainApp:
                         ax.set_facecolor("#1a222b" if self.is_dark_mode else "#f8f9fb")
                         fig.patch.set_facecolor("#0f141b" if self.is_dark_mode else "white")
                         fig.tight_layout()
-                        chart = MatplotlibChart(fig, expand=True)
+                        chart = self._matplotlib_fig_to_image(
+                            fig,
+                            alt_text="Histórico FFT guardado",
+                        )
                     else:
                         fig, ax = plt.subplots(figsize=(11, 5))
                         heatmap_data = amp_matrix_np.T
@@ -7001,7 +7048,10 @@ class MainApp:
                             cbar.ax.yaxis.set_tick_params(color="white")
                             plt.setp(cbar.ax.get_yticklabels(), color="white")
                         fig.tight_layout()
-                        chart = MatplotlibChart(fig, expand=True)
+                        chart = self._matplotlib_fig_to_image(
+                            fig,
+                            alt_text="Tendencia FFT (evolución de amplitud)",
+                        )
                 except Exception as exc_chart:
                     chart = ft.Text(f"No se pudo renderizar la tendencia FFT: {exc_chart}")
 
