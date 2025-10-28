@@ -14,6 +14,7 @@ import re
 import joblib
 import warnings
 import json
+import math
 matplotlib.use("Agg")
 # Matplotlib font configuration to avoid missing glyphs in SVG (e.g., Arial)
 import matplotlib as mpl
@@ -6867,74 +6868,142 @@ class MainApp:
 
             amp_matrix_np = np.nan_to_num(amp_matrix_np, nan=0.0, posinf=0.0, neginf=0.0)
 
-            if len(amp_matrix_np) == 1:
-                line_color = self.fft_plot_color if getattr(self, "fft_plot_color", None) else self._accent_ui()
-                fig = go.Figure()
-                fig.add_trace(
-                    go.Scatter(
-                        x=freq_grid.tolist(),
-                        y=amp_matrix_np[0].tolist(),
-                        mode="lines",
-                        line=dict(color=line_color, width=2),
-                        hovertemplate=f"Frecuencia: %{{x:.3f}} {freq_unit}<br>Velocidad: %{{y:.3f}} {amp_unit}<extra></extra>",
-                    )
-                )
-                fig.update_layout(
-                    title="Histórico FFT guardado (1 registro)",
-                    xaxis=dict(title=f"Frecuencia ({freq_unit})"),
-                    yaxis=dict(title=f"Velocidad [{amp_unit}]", rangemode="tozero"),
-                    template="plotly_dark" if self.is_dark_mode else "plotly_white",
-                    margin=dict(l=40, r=20, t=60, b=40),
-                    paper_bgcolor=face_color,
-                    plot_bgcolor=face_color,
-                )
-                chart = PlotlyChart(fig, expand=True)
-            else:
-                time_iso = [ts.isoformat() for ts in timestamps]
-                heatmap_data = amp_matrix_np.T
-                vmax = float(np.nanmax(heatmap_data)) if np.size(heatmap_data) else 0.0
-                if not np.isfinite(vmax) or vmax <= 0:
-                    vmax = None
-                colorscale = "Inferno" if self.is_dark_mode else "Magma"
-                customdata = np.tile(np.array(time_labels, dtype=object), (len(freq_grid), 1)).tolist()
-                fig = go.Figure(
-                    data=
-                    [
-                        go.Heatmap(
-                            x=time_iso,
-                            y=freq_grid.tolist(),
-                            z=heatmap_data,
-                            colorscale=colorscale,
-                            zsmooth=False,
-                            colorbar=dict(title=f"Velocidad [{amp_unit}]", lenmode="fraction", len=0.75),
-                            zmin=0,
-                            zmax=vmax,
-                            hovertemplate=(
-                                "Fecha: %{customdata}<br>"
-                                f"Frecuencia: %{{y:.3f}} {freq_unit}<br>"
-                                f"Velocidad: %{{z:.3f}} {amp_unit}<extra></extra>"
-                            ),
-                            customdata=customdata,
+            line_color = self.fft_plot_color if getattr(self, "fft_plot_color", None) else self._accent_ui()
+
+            if self.interactive_charts_enabled:
+                if len(amp_matrix_np) == 1:
+                    fig = go.Figure()
+                    fig.add_trace(
+                        go.Scatter(
+                            x=freq_grid.tolist(),
+                            y=amp_matrix_np[0].tolist(),
+                            mode="lines",
+                            line=dict(color=line_color, width=2),
+                            hovertemplate=f"Frecuencia: %{{x:.3f}} {freq_unit}<br>Velocidad: %{{y:.3f}} {amp_unit}<extra></extra>",
                         )
-                    ]
-                )
-                fig.update_layout(
-                    title="Tendencia FFT (evolución de amplitud)",
-                    xaxis=dict(
-                        title="Fecha / Hora",
-                        type="date",
-                        tickmode="array",
-                        tickvals=time_iso,
-                        ticktext=time_labels,
-                        tickangle=0,
-                    ),
-                    yaxis=dict(title=f"Frecuencia ({freq_unit})", rangemode="tozero"),
-                    template="plotly_dark" if self.is_dark_mode else "plotly_white",
-                    margin=dict(l=60, r=30, t=60, b=80),
-                    paper_bgcolor=face_color,
-                    plot_bgcolor=face_color,
-                )
-                chart = PlotlyChart(fig, expand=True)
+                    )
+                    fig.update_layout(
+                        title="Histórico FFT guardado (1 registro)",
+                        xaxis=dict(title=f"Frecuencia ({freq_unit})"),
+                        yaxis=dict(title=f"Velocidad [{amp_unit}]", rangemode="tozero"),
+                        template="plotly_dark" if self.is_dark_mode else "plotly_white",
+                        margin=dict(l=40, r=20, t=60, b=40),
+                        paper_bgcolor=face_color,
+                        plot_bgcolor=face_color,
+                    )
+                    chart = PlotlyChart(fig, expand=True)
+                else:
+                    time_iso = [ts.isoformat() for ts in timestamps]
+                    heatmap_data = amp_matrix_np.T
+                    vmax = float(np.nanmax(heatmap_data)) if np.size(heatmap_data) else 0.0
+                    if not np.isfinite(vmax) or vmax <= 0:
+                        vmax = None
+                    colorscale = "Inferno" if self.is_dark_mode else "Magma"
+                    customdata = np.tile(np.array(time_labels, dtype=object), (len(freq_grid), 1)).tolist()
+                    fig = go.Figure(
+                        data=
+                        [
+                            go.Heatmap(
+                                x=time_iso,
+                                y=freq_grid.tolist(),
+                                z=heatmap_data,
+                                colorscale=colorscale,
+                                zsmooth=False,
+                                colorbar=dict(title=f"Velocidad [{amp_unit}]", lenmode="fraction", len=0.75),
+                                zmin=0,
+                                zmax=vmax,
+                                hovertemplate=(
+                                    "Fecha: %{customdata}<br>"
+                                    f"Frecuencia: %{{y:.3f}} {freq_unit}<br>"
+                                    f"Velocidad: %{{z:.3f}} {amp_unit}<extra></extra>"
+                                ),
+                                customdata=customdata,
+                            )
+                        ]
+                    )
+                    fig.update_layout(
+                        title="Tendencia FFT (evolución de amplitud)",
+                        xaxis=dict(
+                            title="Fecha / Hora",
+                            type="date",
+                            tickmode="array",
+                            tickvals=time_iso,
+                            ticktext=time_labels,
+                            tickangle=0,
+                        ),
+                        yaxis=dict(title=f"Frecuencia ({freq_unit})", rangemode="tozero"),
+                        template="plotly_dark" if self.is_dark_mode else "plotly_white",
+                        margin=dict(l=60, r=30, t=60, b=80),
+                        paper_bgcolor=face_color,
+                        plot_bgcolor=face_color,
+                    )
+                    chart = PlotlyChart(fig, expand=True)
+            else:
+                try:
+                    if len(amp_matrix_np) == 1:
+                        fig, ax = plt.subplots(figsize=(10, 4.5))
+                        ax.plot(freq_grid, amp_matrix_np[0], color=line_color, linewidth=2)
+                        ax.fill_between(freq_grid, amp_matrix_np[0], color=line_color, alpha=0.25)
+                        ax.set_xlabel(f"Frecuencia ({freq_unit})")
+                        ax.set_ylabel(f"Velocidad [{amp_unit}]")
+                        title_ts = time_labels[0] if time_labels else ""
+                        subtitle = f"Registro: {title_ts}" if title_ts else ""
+                        ax.set_title("Histórico FFT guardado" + (f" – {subtitle}" if subtitle else ""))
+                        ax.grid(True, alpha=0.25)
+                        text_color = "white" if self.is_dark_mode else "black"
+                        ax.tick_params(colors=text_color)
+                        ax.xaxis.label.set_color(text_color)
+                        ax.yaxis.label.set_color(text_color)
+                        ax.title.set_color(text_color)
+                        ax.set_facecolor("#1a222b" if self.is_dark_mode else "#f8f9fb")
+                        fig.patch.set_facecolor("#0f141b" if self.is_dark_mode else "white")
+                        fig.tight_layout()
+                        chart = MatplotlibChart(fig, expand=True)
+                    else:
+                        fig, ax = plt.subplots(figsize=(11, 5))
+                        heatmap_data = amp_matrix_np.T
+                        vmax = float(np.nanmax(heatmap_data)) if np.size(heatmap_data) else None
+                        if vmax is not None and (not np.isfinite(vmax) or vmax <= 0):
+                            vmax = None
+                        cmap_name = "inferno" if self.is_dark_mode else "magma"
+                        extent = (-0.5, len(time_labels) - 0.5, freq_grid[0], freq_grid[-1])
+                        im = ax.imshow(
+                            heatmap_data,
+                            aspect="auto",
+                            origin="lower",
+                            extent=extent,
+                            cmap=cmap_name,
+                            vmin=0,
+                            vmax=vmax,
+                        )
+                        ax.set_xlabel("Fecha de registro")
+                        ax.set_ylabel(f"Frecuencia ({freq_unit})")
+                        ax.set_title("Tendencia FFT (evolución de amplitud)")
+                        full_ticks = list(range(len(time_labels)))
+                        if time_labels:
+                            if len(time_labels) > 12:
+                                step = max(1, math.ceil(len(time_labels) / 12))
+                                tick_idx = full_ticks[::step]
+                            else:
+                                tick_idx = full_ticks
+                            ax.set_xticks(tick_idx)
+                            ax.set_xticklabels([time_labels[i] for i in tick_idx], rotation=45, ha="right")
+                        ax.set_facecolor("#1a222b" if self.is_dark_mode else "#f8f9fb")
+                        fig.patch.set_facecolor("#0f141b" if self.is_dark_mode else "white")
+                        text_color = "white" if self.is_dark_mode else "black"
+                        ax.tick_params(colors=text_color)
+                        ax.xaxis.label.set_color(text_color)
+                        ax.yaxis.label.set_color(text_color)
+                        ax.title.set_color(text_color)
+                        cbar = fig.colorbar(im, ax=ax, pad=0.02)
+                        cbar.set_label(f"Velocidad [{amp_unit}]")
+                        if self.is_dark_mode:
+                            cbar.ax.yaxis.set_tick_params(color="white")
+                            plt.setp(cbar.ax.get_yticklabels(), color="white")
+                        fig.tight_layout()
+                        chart = MatplotlibChart(fig, expand=True)
+                except Exception as exc_chart:
+                    chart = ft.Text(f"No se pudo renderizar la tendencia FFT: {exc_chart}")
 
             legend_texts = []
             for idx, ts_text in enumerate(time_labels, start=1):
