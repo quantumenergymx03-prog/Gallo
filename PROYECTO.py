@@ -5,7 +5,6 @@ import time
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from matplotlib.collections import PolyCollection
 from flet.matplotlib_chart import MatplotlibChart
 from flet.plotly_chart import PlotlyChart
 import numpy as np
@@ -26,7 +25,6 @@ import os
 import colorsys
 import unicodedata
 from typing import Optional, Tuple, Dict, Any, List, Sequence, Mapping
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  # Needed for 3D projections
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 # --- PDF reportlab imports ---
@@ -6891,43 +6889,52 @@ class MainApp:
                 plt.close(fig)
             else:
                 time_nums = mdates.date2num(timestamps)
-                fig = plt.figure(figsize=(10, 5))
+                freq_max = max(freq_max, float(freq_grid.max()))
+                freq_min = min(freq_min, float(freq_grid.min()))
+                if not np.isfinite(freq_max) or not np.isfinite(freq_min):
+                    freq_min, freq_max = 0.0, float(np.nanmax(freq_grid))
+                if freq_max <= freq_min:
+                    freq_max = freq_min + max(freq_max * 0.01, 1.0)
+
+                data = amp_matrix_np.T  # (frecuencia x tiempo)
+                time_start = time_nums[0]
+                time_end = time_nums[-1]
+                if not np.isfinite(time_start) or not np.isfinite(time_end):
+                    time_start, time_end = 0.0, float(len(time_nums) - 1)
+                if time_end <= time_start:
+                    time_end = time_start + 1 / 24  # evita rango nulo en eje X
+
+                cmap = cm.magma if not self.is_dark_mode else cm.inferno
+
+                fig, ax = plt.subplots(figsize=(10, 5))
                 fig.patch.set_facecolor(face_color)
-                ax = fig.add_subplot(111, projection="3d")
                 ax.set_facecolor(face_color)
-                color_vals = cm.viridis(np.linspace(0.1, 0.9, amp_matrix_np.shape[0]))
-                max_amp = float(np.nanmax(amp_matrix_np)) if np.size(amp_matrix_np) else 0.0
-                for amp_row, time_num, color in zip(amp_matrix_np, time_nums, color_vals):
-                    verts = [list(zip(freq_grid, amp_row))]
-                    poly = PolyCollection(
-                        verts,
-                        facecolors=[(color[0], color[1], color[2], 0.22)],
-                        edgecolors="none",
-                    )
-                    ax.add_collection3d(poly, zs=time_num, zdir="x")
-                    ax.plot(
-                        freq_grid,
-                        amp_row,
-                        zs=time_num,
-                        zdir="x",
-                        color=color,
-                        linewidth=2.0,
-                    )
-                ax.set_xlim(time_nums.min(), time_nums.max())
-                ax.set_ylim(freq_grid.min(), freq_grid.max())
-                if np.isfinite(max_amp) and max_amp > 0:
-                    ax.set_zlim(0.0, max_amp * 1.05)
-                ax.set_title("Histórico FFT guardado", color=axis_color)
-                ax.set_xlabel("Fecha", color=axis_color)
+
+                extent = [time_start, time_end, freq_min, freq_max]
+                im = ax.imshow(
+                    data,
+                    aspect="auto",
+                    origin="lower",
+                    extent=extent,
+                    cmap=cmap,
+                    interpolation="nearest",
+                )
+
+                ax.xaxis_date()
+                ax.set_xlabel("Fecha / Hora", color=axis_color)
                 ax.set_ylabel(f"Frecuencia ({freq_unit})", color=axis_color)
-                ax.set_zlabel(f"Velocidad [{amp_unit}]", color=axis_color)
-                ax.view_init(elev=32, azim=-135)
+                ax.set_title("Tendencia FFT (evolución de amplitud)", color=axis_color)
                 ax.xaxis.set_major_locator(mdates.AutoDateLocator())
                 ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m/%Y\n%H:%M"))
-                for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
-                    for tick in axis.get_ticklabels():
-                        tick.set_color(axis_color)
-                ax.title.set_color(axis_color)
+
+                cbar = fig.colorbar(im, ax=ax, pad=0.02, aspect=30)
+                cbar.set_label(f"Velocidad [{amp_unit}]", color=axis_color)
+                for tick in cbar.ax.get_yticklabels():
+                    tick.set_color(axis_color)
+
+                for tick in ax.get_xticklabels() + ax.get_yticklabels():
+                    tick.set_color(axis_color)
+
                 try:
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", UserWarning)
