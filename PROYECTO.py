@@ -2130,6 +2130,7 @@ class MainApp:
         self.current_df = None
         self._raw_current_df: Optional[pd.DataFrame] = None
         self.current_file_path: Optional[str] = None
+        self.current_file_source_path: Optional[str] = None
         self.current_fft_label: Optional[str] = None
 
         self.file_data_storage = {}  # Almacenar datos de archivos
@@ -3175,26 +3176,31 @@ class MainApp:
         """Convierte una figura de Matplotlib en un control de imagen para Flet."""
 
         buffer = io.BytesIO()
+        dpi = 160
+        try:
+            fig_width, fig_height = fig.get_size_inches()
+        except Exception:
+            fig_width, fig_height = (6.0, 4.0)
         try:
             fig.savefig(
                 buffer,
                 format="png",
-                dpi=160,
+                dpi=dpi,
                 bbox_inches="tight",
                 facecolor=fig.get_facecolor(),
             )
             buffer.seek(0)
             encoded = base64.b64encode(buffer.read()).decode("ascii")
+            width_px = width if width is not None else int(max(fig_width * dpi, 1))
+            height_px = height if height is not None else int(max(fig_height * dpi, 1))
             image_control = ft.Image(
                 src_base64=encoded,
                 fit=ft.ImageFit.CONTAIN,
-                expand=True,
                 semantics_label=alt_text or None,
+                expand=True,
+                width=width_px,
+                height=height_px,
             )
-            if width is not None:
-                image_control.width = width
-            if height is not None:
-                image_control.height = height
             return image_control
         except Exception as exc:
             self._log(f"No se pudo generar la imagen estática de Matplotlib: {exc}")
@@ -6798,6 +6804,27 @@ class MainApp:
                     timestamp = str(entry.get("timestamp") or entry.get("date") or "")
                     label_value = entry.get("label") or entry.get("source") or raw_label or ""
                     label_clean = str(label_value).strip() or "analisis_actual"
+                    try:
+                        source_path = str(entry.get("source_path") or entry.get("source") or "").strip()
+                    except Exception:
+                        source_path = ""
+                    try:
+                        stored_path = str(entry.get("stored_path") or "").strip()
+                    except Exception:
+                        stored_path = ""
+                    if source_path:
+                        try:
+                            source_path = os.path.abspath(source_path)
+                        except Exception:
+                            source_path = source_path
+                    if stored_path:
+                        try:
+                            stored_path = os.path.abspath(stored_path)
+                        except Exception:
+                            stored_path = stored_path
+                    if not stored_path and source_path:
+                        stored_path = source_path
+
                     normalized_entry = {
                         "timestamp": timestamp,
                         "label": label_clean,
@@ -6805,8 +6832,8 @@ class MainApp:
                         "amp": amp_clean,
                         "freq_unit": str(entry.get("freq_unit") or "Hz"),
                         "amp_unit": str(entry.get("amp_unit") or "mm/s"),
-                        "source_path": str(entry.get("source_path") or entry.get("source") or ""),
-                        "stored_path": str(entry.get("stored_path") or ""),
+                        "source_path": source_path,
+                        "stored_path": stored_path,
                     }
                     bucket = records.setdefault(label_clean, [])
                     bucket.append(normalized_entry)
@@ -7055,19 +7082,31 @@ class MainApp:
                 except Exception as exc_chart:
                     chart = ft.Text(f"No se pudo renderizar la tendencia FFT: {exc_chart}")
 
-            legend_texts = []
+            legend_texts: List[ft.Control] = []
             for idx, ts_text in enumerate(time_labels, start=1):
                 legend_texts.append(ft.Text(f"{ts_text} · FFT #{idx}", size=12))
 
-            legend_column = ft.Column(legend_texts, spacing=2, scroll="auto") if legend_texts else ft.Container()
+            if legend_texts:
+                legend_column: ft.Control = ft.Container(
+                    content=ft.Column(legend_texts, spacing=4, scroll="auto"),
+                    padding=ft.padding.only(top=4),
+                )
+            else:
+                legend_column = ft.Container()
+
+            content_controls: List[ft.Control] = [
+                ft.Text(f"Histórico FFT (tendencia) – {label}", size=20, weight="bold"),
+            ]
+            if not self.interactive_charts_enabled:
+                content_controls.append(self._build_chart_notice())
+            content_controls.append(chart)
+            if legend_texts:
+                content_controls.append(legend_column)
 
             return ft.Column(
-                [
-                    ft.Text(f"Histórico FFT (tendencia) – {label}", size=20, weight="bold"),
-                    chart,
-                    legend_column,
-                ],
+                content_controls,
                 spacing=12,
+                expand=True,
             )
         except Exception as exc:
             import traceback
@@ -7159,32 +7198,65 @@ class MainApp:
                 visible = records[-limit:]
                 for idx, entry in enumerate(visible, start=1):
                     ts = entry.get("timestamp", "N/D")
-                    source_path = entry.get("source_path") or entry.get("source") or ""
-                    stored_path = entry.get("stored_path") or ""
+                    raw_source_path = entry.get("source_path") or entry.get("source") or ""
+                    raw_stored_path = entry.get("stored_path") or ""
+                    try:
+                        source_path = os.path.abspath(raw_source_path) if raw_source_path else ""
+                    except Exception:
+                        source_path = raw_source_path or ""
+                    try:
+                        stored_path = os.path.abspath(raw_stored_path) if raw_stored_path else ""
+                    except Exception:
+                        stored_path = raw_stored_path or ""
+
                     resolved_path = ""
-                    subtitle = "Origen desconocido"
-                    subtitle_color = "#7f8c8d"
-                    if source_path and os.path.exists(source_path):
-                        resolved_path = source_path
-                        subtitle = os.path.basename(source_path)
-                    elif stored_path and os.path.exists(stored_path):
+                    info_lines: List[ft.Text] = []
+                    try:
+                        different_paths = source_path and stored_path and os.path.normcase(source_path) != os.path.normcase(stored_path)
+                    except Exception:
+                        different_paths = source_path != stored_path and bool(source_path and stored_path)
+
+                    if stored_path and os.path.exists(stored_path):
                         resolved_path = stored_path
-                        base_name = os.path.basename(stored_path)
-                        subtitle = f"{base_name} (copia local)"
-                        subtitle_color = "#16a085"
+                        base_name = os.path.basename(stored_path) or stored_path
+                        label_text = base_name
+                        label_color = "#16a085" if different_paths else "#7f8c8d"
+                        if different_paths:
+                            label_text = f"{base_name} (copia local)"
+                        info_lines.append(ft.Text(label_text, size=12, color=label_color))
+                        if different_paths:
+                            origin_exists = bool(source_path and os.path.exists(source_path))
+                            origin_label = os.path.basename(source_path) or source_path
+                            origin_color = "#7f8c8d" if origin_exists else "#e67e22"
+                            suffix = "" if origin_exists else " (no disponible)"
+                            info_lines.append(ft.Text(f"Origen: {origin_label}{suffix}", size=11, color=origin_color))
+                    elif source_path and os.path.exists(source_path):
+                        resolved_path = source_path
+                        base_name = os.path.basename(source_path) or source_path
+                        info_lines.append(ft.Text(base_name, size=12, color="#7f8c8d"))
                     else:
-                        fallback_name = os.path.basename(source_path) or os.path.basename(stored_path) or ""
+                        fallback_name = os.path.basename(source_path) or os.path.basename(stored_path) or raw_source_path or raw_stored_path or ""
                         if fallback_name:
-                            subtitle = f"{fallback_name} (no disponible)"
-                        subtitle_color = "#e74c3c"
+                            info_lines.append(ft.Text(f"{fallback_name} (no disponible)", size=12, color="#e74c3c"))
+                        else:
+                            info_lines.append(ft.Text("Origen desconocido", size=12, color="#e74c3c"))
+
                     info_column = ft.Column(
                         [
                             ft.Text(f"{idx}. {ts}", weight="bold"),
-                            ft.Text(subtitle, size=12, color=subtitle_color),
+                            *info_lines,
                         ],
                         spacing=2,
                         expand=True,
                     )
+
+                    if not resolved_path:
+                        try:
+                            self._log(
+                                f"No se encontró el archivo asociado para el registro #{idx} ({ts})."
+                            )
+                        except Exception:
+                            pass
                     action_buttons: List[ft.Control] = []
                     if resolved_path:
                         action_buttons.append(
@@ -7318,6 +7390,8 @@ class MainApp:
             except Exception:
                 label = "analisis_actual"
             self.current_fft_label = label
+        source_original = getattr(self, "current_file_source_path", None)
+        stored_path = getattr(self, "current_file_path", None)
         record = {
             "timestamp": timestamp,
             "label": label,
@@ -7325,7 +7399,8 @@ class MainApp:
             "amp": [float(x) for x in amp.tolist()],
             "freq_unit": "Hz",
             "amp_unit": "mm/s",
-            "source_path": str(self.current_file_path or ""),
+            "source_path": str(source_original or stored_path or ""),
+            "stored_path": str(stored_path or ""),
         }
         bucket = self.fft_trend_records.setdefault(label, [])
         bucket.append(record)
@@ -11647,6 +11722,7 @@ class MainApp:
             clear_file_storage=False,
         )
         self.current_file_path = None
+        self.current_file_source_path = None
         self.current_fft_label = None
         try:
             self._refresh_fft_trend_chart()
@@ -11705,9 +11781,17 @@ class MainApp:
         calibrations: Dict[str, Dict[str, float]] = {}
 
         try:
+            incoming_path = os.path.abspath(file_path)
+        except Exception:
+            incoming_path = str(file_path)
+        original_file_path = incoming_path
+
+        try:
             cached_df: Optional[pd.DataFrame] = None
             if hasattr(self, "file_data_storage") and isinstance(self.file_data_storage, dict):
                 cached_df = self.file_data_storage.get(file_path)
+                if cached_df is None and incoming_path != file_path:
+                    cached_df = self.file_data_storage.get(incoming_path)
         except Exception:
             cached_df = None
 
@@ -11718,6 +11802,7 @@ class MainApp:
                 df = cached_df.copy(deep=True)
                 df_std = df.copy(deep=True)
                 normalized = True
+                file_path = incoming_path
             else:
                 # Carga completa desde disco
                 self._reset_analysis_state_on_new_file()
@@ -11734,22 +11819,29 @@ class MainApp:
                 data_dir = os.path.join(os.getcwd(), "data")
                 os.makedirs(data_dir, exist_ok=True)
                 abs_data_dir = os.path.abspath(data_dir)
-                storage_path = os.path.abspath(file_path)
+                storage_path = incoming_path
                 try:
-                    if not storage_path.startswith(abs_data_dir):
-                        base_name = os.path.basename(file_path)
+                    try:
+                        within_data_dir = os.path.commonpath([storage_path, abs_data_dir]) == abs_data_dir
+                    except Exception:
+                        within_data_dir = str(storage_path).startswith(abs_data_dir)
+                    if not within_data_dir:
+                        base_name = os.path.basename(incoming_path)
                         target_path = os.path.join(data_dir, base_name)
                         root_name, ext = os.path.splitext(base_name)
                         counter = 1
                         while os.path.exists(target_path):
                             target_path = os.path.join(data_dir, f"{root_name}_{counter}{ext}")
                             counter += 1
-                        shutil.copy2(file_path, target_path)
+                        shutil.copy2(incoming_path, target_path)
                         storage_path = os.path.abspath(target_path)
                         self._log(f"Archivo copiado al repositorio local: {os.path.basename(target_path)}")
+                    else:
+                        storage_path = os.path.abspath(storage_path)
                 except Exception as copy_exc:
                     self._log(f"No se pudo guardar copia local: {copy_exc}")
                 file_path = storage_path
+                original_file_path = incoming_path
 
                 if file_path.endswith('.csv'):
                     df_raw = pd.read_csv(file_path)
@@ -11844,10 +11936,17 @@ class MainApp:
         except Exception:
             self.uploaded_files = [file_path]
 
-        self.file_data_storage[file_path] = df.copy(deep=True)
+        dataset_copy = df.copy(deep=True)
+        self.file_data_storage[file_path] = dataset_copy
+        if incoming_path != file_path:
+            self.file_data_storage[incoming_path] = dataset_copy
         self.current_df = df
         self._raw_current_df = df.copy(deep=True)
         self.current_file_path = file_path
+        try:
+            self.current_file_source_path = original_file_path or file_path
+        except Exception:
+            self.current_file_source_path = file_path
         try:
             base_label = os.path.splitext(os.path.basename(file_path))[0]
         except Exception:
