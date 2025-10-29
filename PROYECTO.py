@@ -6506,9 +6506,29 @@ class MainApp:
 
         initial_loading = ft.Column(
 
-            [ft.ProgressRing(), ft.Text("Preparando análisis...")],
+            [
+
+                ft.ProgressRing(),
+
+                ft.ProgressBar(
+
+                    width=260,
+
+                    value=None,
+
+                    color=self._accent_ui(),
+
+                ),
+
+                ft.Text("Preparando análisis..."),
+
+            ],
 
             alignment="center",
+
+            horizontal_alignment="center",
+
+            spacing=12,
 
             expand=True,
 
@@ -6688,11 +6708,29 @@ class MainApp:
 
             loading_view = ft.Column(
 
-                [ft.ProgressRing(), ft.Text("Generando análisis FFT...")],
+                [
+
+                    ft.ProgressRing(),
+
+                    ft.ProgressBar(
+
+                        width=260,
+
+                        value=None,
+
+                        color=self._accent_ui(),
+
+                    ),
+
+                    ft.Text("Generando análisis FFT..."),
+
+                ],
 
                 horizontal_alignment="center",
 
                 alignment="center",
+
+                spacing=12,
 
                 expand=True
 
@@ -6763,9 +6801,20 @@ class MainApp:
             face_color = "#0f141b" if self.is_dark_mode else "white"
             axis_color = "white" if self.is_dark_mode else "black"
 
-            fig, ax = plt.subplots(figsize=(10, 4))
+            has_multiple = len(snapshots) > 1
+            if has_multiple:
+                fig = plt.figure(figsize=(10, 6))
+                grid = fig.add_gridspec(2, 1, height_ratios=[2, 3], hspace=0.35)
+                ax = fig.add_subplot(grid[0, 0])
+                ax3d = fig.add_subplot(grid[1, 0], projection="3d")
+            else:
+                fig, ax = plt.subplots(figsize=(10, 4))
+                ax3d = None
+
             fig.patch.set_facecolor(face_color)
             ax.set_facecolor(face_color)
+            if ax3d is not None:
+                ax3d.set_facecolor(face_color)
 
             try:
                 use_dbv = bool(
@@ -6824,7 +6873,8 @@ class MainApp:
             freq_unit = getattr(self, "_fft_display_unit", "Hz") or "Hz"
 
             plotted_any = False
-            for snap in snapshots:
+            plot_series: List[Tuple[int, str, np.ndarray, np.ndarray]] = []
+            for idx, snap in enumerate(snapshots):
                 freq = np.asarray(snap.get("freq_hz") or [], dtype=float)
                 vel = np.asarray(snap.get("vel_mm_s") or [], dtype=float)
                 if freq.size == 0 or vel.size == 0:
@@ -6859,12 +6909,16 @@ class MainApp:
                     )
                 else:
                     yplot = vel
+                freq_plot = freq[mask] / freq_scale
+                yplot_masked = yplot[mask]
                 ax.plot(
-                    (freq[mask] / freq_scale),
-                    yplot[mask],
+                    freq_plot,
+                    yplot_masked,
                     linewidth=2,
                     label=label,
                 )
+                if freq_plot.size and yplot_masked.size:
+                    plot_series.append((idx, label, freq_plot, yplot_masked))
                 plotted_any = True
 
             if not plotted_any:
@@ -6930,6 +6984,49 @@ class MainApp:
                     text.set_color(axis_color)
             for tick in ax.get_xticklabels() + ax.get_yticklabels():
                 tick.set_color(axis_color)
+
+            if ax3d is not None and plot_series:
+                amplitude_label = "Amplitud (dBV)" if use_dbv else "Velocidad (mm/s)"
+                y_ticks: List[int] = []
+                y_labels: List[str] = []
+                for series_idx, label, freq_vals, y_vals in plot_series:
+                    if freq_vals.size == 0 or y_vals.size == 0:
+                        continue
+                    y_coords = np.full_like(freq_vals, series_idx, dtype=float)
+                    ax3d.plot(
+                        freq_vals,
+                        y_coords,
+                        y_vals,
+                        linewidth=1.6,
+                        label=label,
+                    )
+                    y_ticks.append(series_idx)
+                    y_labels.append(label)
+
+                if y_ticks:
+                    ax3d.set_yticks(y_ticks)
+                    ax3d.set_yticklabels(y_labels, color=axis_color)
+
+                ax3d.set_xlabel(f"Frecuencia ({freq_unit})", color=axis_color)
+                ax3d.set_ylabel("Serie", color=axis_color)
+                ax3d.set_zlabel(amplitude_label, color=axis_color)
+                ax3d.tick_params(axis="x", colors=axis_color)
+                ax3d.tick_params(axis="y", colors=axis_color)
+                ax3d.tick_params(axis="z", colors=axis_color)
+                ax3d.view_init(elev=28, azim=-45)
+                if fmax_ui and fmax_ui > 0:
+                    ax3d.set_xlim(0.0, float(fmax_ui) / freq_scale)
+                else:
+                    cur_xlim = ax3d.get_xlim()
+                    ax3d.set_xlim(left=0.0, right=cur_xlim[1])
+                if fmin_ui and fmin_ui > 0:
+                    cur = ax3d.get_xlim()
+                    ax3d.set_xlim(
+                        left=float(fmin_ui) / freq_scale,
+                        right=cur[1],
+                    )
+                ax3d.grid(True, alpha=0.25)
+                ax3d.set_title("Vista 3D de FFT comparadas", color=axis_color, pad=12)
 
             try:
                 with warnings.catch_warnings():
