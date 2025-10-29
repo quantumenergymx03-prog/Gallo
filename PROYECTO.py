@@ -24,7 +24,7 @@ mpl.rcParams["axes.unicode_minus"] = False
 import os
 import colorsys
 import unicodedata
-from typing import Optional, Tuple, Dict, Any, List, Sequence, Mapping
+from typing import Optional, Tuple, Dict, Any, List, Sequence, Mapping, Iterable
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  # Needed for 3D projections
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -7353,9 +7353,17 @@ class MainApp:
             return
 
         fft_block = result.get("fft", {}) if isinstance(result, dict) else {}
-        freq = np.asarray(fft_block.get("f_hz") or [], dtype=float)
-        vel = np.asarray(fft_block.get("vel_spec_mm_s") or [], dtype=float)
-        acc_spec = np.asarray(fft_block.get("acc_spec_ms2") or np.zeros_like(freq), dtype=float)
+
+        def _safe_np_array(payload: Optional[Iterable[float]], *, like: Optional[np.ndarray] = None) -> np.ndarray:
+            if payload is None:
+                if like is not None:
+                    return np.zeros_like(like, dtype=float)
+                return np.asarray([], dtype=float)
+            return np.asarray(payload, dtype=float)
+
+        freq = _safe_np_array(fft_block.get("f_hz"))
+        vel = _safe_np_array(fft_block.get("vel_spec_mm_s"))
+        acc_spec = _safe_np_array(fft_block.get("acc_spec_ms2"), like=freq)
         if freq.size == 0 or vel.size == 0:
             self._log("La FFT generada no devolvió espectro de velocidad.")
             return
